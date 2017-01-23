@@ -130,6 +130,10 @@ MODULE_PARM_DESC(impedance_detect_en, "enable/disable impedance detect");
 
 static bool detect_use_vddio_switch;
 
+#ifdef CONFIG_SH_AUDIO_DRIVER /* 07-077 */
+int flag_HPH_L_NOT_INSERTED = 0;
+#endif
+
 struct wcd9xxx_mbhc_detect {
 	u16 dce;
 	u16 sta;
@@ -1496,6 +1500,7 @@ wcd9xxx_cs_find_plug_type(struct wcd9xxx_mbhc *mbhc,
 		goto exit;
 	}
 
+#ifndef CONFIG_SH_AUDIO_DRIVER /* 07-077 */
 	if (!(event_state & (1UL << MBHC_EVENT_PA_HPHL))) {
 		if (((type == PLUG_TYPE_HEADSET ||
 		      type == PLUG_TYPE_HEADPHONE) && ch != sz)) {
@@ -1504,6 +1509,16 @@ wcd9xxx_cs_find_plug_type(struct wcd9xxx_mbhc *mbhc,
 			type = PLUG_TYPE_INVALID;
 		}
 	}
+#else	
+	flag_HPH_L_NOT_INSERTED = 0;
+
+	if (!(event_state & (1UL << MBHC_EVENT_PA_HPHL))) {
+		if (((type == PLUG_TYPE_HEADSET ||
+		      type == PLUG_TYPE_HEADPHONE) && ch != sz)) {
+				flag_HPH_L_NOT_INSERTED = 1;
+		}
+	}
+#endif /* CONFIG_SH_AUDIO_DRIVER *//* 07-077 */
 
 	if (type == PLUG_TYPE_HEADSET &&
 	    (mbhc->mbhc_cfg->micbias_enable_flags &
@@ -2199,9 +2214,21 @@ static void wcd9xxx_mbhc_decide_swch_plug(struct wcd9xxx_mbhc *mbhc)
 		wcd9xxx_schedule_hs_detect_plug(mbhc,
 						&mbhc->correct_plug_swch);
 	} else {
+#ifndef CONFIG_SH_AUDIO_DRIVER /* 07-077 */
 		pr_debug("%s: Valid plug found, determine plug type %d\n",
 			 __func__, plug_type);
 		wcd9xxx_find_plug_and_report(mbhc, plug_type);
+#else
+		if(flag_HPH_L_NOT_INSERTED == 1){
+			wcd9xxx_cleanup_hs_polling(mbhc);
+			wcd9xxx_schedule_hs_detect_plug(mbhc,
+							&mbhc->correct_plug_swch);
+		}else{
+			pr_debug("%s: Valid plug found, determine plug type %d\n",
+				 __func__, plug_type);
+			wcd9xxx_find_plug_and_report(mbhc, plug_type);
+		}
+#endif /* CONFIG_SH_AUDIO_DRIVER */ /* 07-077 */
 	}
 	pr_debug("%s: leave\n", __func__);
 }
@@ -2818,6 +2845,10 @@ static void wcd9xxx_correct_swch_plug(struct work_struct *work)
 	bool correction = false;
 	bool current_source_enable;
 	bool wrk_complete = true, highhph = false;
+	
+#ifdef CONFIG_SH_AUDIO_DRIVER /* 07-077 */
+	int headset_jg =0;
+#endif /* CONFIG_SH_AUDIO_DRIVER */ /* 07-077 */
 
 #ifdef CONFIG_SH_AUDIO_DRIVER /*07-051*/
 	struct delayed_work *dwork;
@@ -2925,6 +2956,18 @@ static void wcd9xxx_correct_swch_plug(struct work_struct *work)
 			pr_debug("%s: High HPH detected, continue polling\n",
 				  __func__);
 		} else {
+
+#ifdef CONFIG_SH_AUDIO_DRIVER /* 07-077 */
+			if (plug_type == PLUG_TYPE_HEADSET) {
+				headset_jg++;
+				if( flag_HPH_L_NOT_INSERTED == 1){
+					if(headset_jg < 4){
+						pr_debug("%s :  judge-headset try one more\n",__func__);
+						continue;
+					}
+				}
+			}
+#endif /* CONFIG_SH_AUDIO_DRIVER *//* 07-077 */
 			if (plug_type == PLUG_TYPE_GND_MIC_SWAP) {
 				pt_gnd_mic_swap_cnt++;
 				if (pt_gnd_mic_swap_cnt <
