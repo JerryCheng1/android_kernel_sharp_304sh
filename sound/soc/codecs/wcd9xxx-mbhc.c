@@ -118,7 +118,11 @@
 /* RX_HPH_CNP_WG_TIME increases by 0.24ms */
 #define WCD9XXX_WG_TIME_FACTOR_US	240
 
+#if defined( CONFIG_SH_AUDIO_DRIVER )
+#define WCD9XXX_V_CS_HS_MAX 700
+#else
 #define WCD9XXX_V_CS_HS_MAX 500
+#endif
 #define WCD9XXX_V_CS_NO_MIC 5
 #define WCD9XXX_MB_MEAS_DELTA_MAX_MV 80
 #define WCD9XXX_CS_MEAS_DELTA_MAX_MV 12
@@ -4484,11 +4488,8 @@ static int wcd9xxx_event_notify(struct notifier_block *self, unsigned long val,
 	            & 0x80)) {
 			pr_debug("%s:Micbias turned off by recording, set up again",
 				 __func__);
-#ifdef CONFIG_SH_AUDIO_DRIVER /*07-051*/
-#else
 			snd_soc_update_bits(codec, mbhc->mbhc_bias_regs.ctl_reg,
 					    0x80, 0x80);
-#endif /* CONFIG_SH_AUDIO_DRIVER */ /*07-051*/
 		}
 		break;
 	/* PA usage change */

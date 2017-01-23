@@ -424,6 +424,8 @@ struct qpnp_chg_chip {
 	int						flash_control_status;
 	bool					flash_control_detect;
 	struct delayed_work		flash_check_work;
+	struct delayed_work		flash_safety_work;
+	struct mutex			flash_control_lock;
 	u8						iusb_trim;
 	u8						idc_trim;
 #endif /* CONFIG_BATTERY_SH */
@@ -4924,6 +4926,7 @@ EXPORT_SYMBOL_GPL(qpnp_chg_batfet_status);
 #define QPNP_FLASH_CHECK_WORK_MSEC	1500
 #define QPNP_FLASH_EN_DELAY_MSEC	20
 #define QPNP_FLASH_DIS_DELAY_MSEC	200
+#define QPNP_FLASH_SAFETY_WORK_MSEC	10000
 
 static int qpnp_flash_check_msec = QPNP_FLASH_CHECK_WORK_MSEC;
 module_param_named(flash_check_msec, qpnp_flash_check_msec, int, 0600);
@@ -4935,6 +4938,10 @@ static int qpnp_flash_en_delay_msec = QPNP_FLASH_EN_DELAY_MSEC;
 module_param_named(flash_en_delay_msec, qpnp_flash_en_delay_msec, int, 0600);
 static int qpnp_flash_dis_delay_msec = QPNP_FLASH_DIS_DELAY_MSEC;
 module_param_named(flash_dis_delay_msec, qpnp_flash_dis_delay_msec, int, 0600);
+static int qpnp_flash_safety_msec = QPNP_FLASH_SAFETY_WORK_MSEC;
+module_param_named(flash_safety_msec, qpnp_flash_safety_msec, int, 0600);
+
+static int __qpnp_flash_control_enable(bool enable, bool safefy);
 
 static void qpnp_flash_status_change(struct qpnp_chg_chip *chip, int status)
 {
@@ -4971,16 +4978,33 @@ static void qpnp_flash_check_work(struct work_struct *work)
 	qpnp_flash_status_change(chip, QPNP_FLASH_CONTROL_OFF);
 }
 
-int qpnp_flash_control_enable(bool enable)
+static void qpnp_flash_safety_work(struct work_struct *work)
+{
+	struct delayed_work *dwork = to_delayed_work(work);
+	struct qpnp_chg_chip *chip = container_of(dwork,
+				struct qpnp_chg_chip, flash_safety_work);
+
+	pr_err("status = %d flash control safety disable\n", chip->flash_control_status);
+	__qpnp_flash_control_enable(false, true);
+}
+
+static int __qpnp_flash_control_enable(bool enable, bool safety)
 {
 	int usb_susp_en;
 	u8 reg;
-	int rc;
+	int rc = 0;
 
 	if (!the_chip)
 	{
 		pr_err("qpnp charger is not initialized\n");
 		return -EINVAL;
+	}
+
+	mutex_lock(&the_chip->flash_control_lock);
+
+	if (!safety)
+	{
+		cancel_delayed_work_sync(&the_chip->flash_safety_work);
 	}
 
 	if (enable)
@@ -4991,7 +5015,7 @@ int qpnp_flash_control_enable(bool enable)
 		{
 			pr_err("usb_susp read failed addr = 0x%04x, rc = %d\n",
 				the_chip->usb_chgpth_base + CHGR_USB_USB_SUSP, rc);
-			return rc;
+			goto unlock;
 		}
 
 		usb_susp_en = (reg & USB_SUSPEND_BIT) ? 1 : 0;
@@ -5001,18 +5025,21 @@ int qpnp_flash_control_enable(bool enable)
 		rc = qpnp_chg_usb_suspend_enable(the_chip, 1);
 		if (rc)
 		{
-			return rc;
+			goto unlock;
 		}
 
 		cancel_delayed_work_sync(&the_chip->flash_check_work);
 		qpnp_flash_status_change(the_chip, QPNP_FLASH_CONTROL_ON);
+
+		schedule_delayed_work(&the_chip->flash_safety_work,
+			msecs_to_jiffies(qpnp_flash_safety_msec));
 
 		mdelay(qpnp_flash_en_delay_msec);
 
 		rc = qpnp_chg_iusbmax_set(the_chip, 200);
 		if (rc)
 		{
-			return rc;
+			goto unlock;
 		}
 
 		if ((qpnp_chg_is_usb_chg_plugged_in(the_chip)) &&
@@ -5025,7 +5052,7 @@ int qpnp_flash_control_enable(bool enable)
 			if (rc)
 			{
 				pr_err("failed to write SEC_ACCESS rc=%d\n", rc);
-				return rc;
+				goto unlock;
 			}
 
 			rc = qpnp_chg_masked_write(the_chip,
@@ -5035,7 +5062,7 @@ int qpnp_flash_control_enable(bool enable)
 			if (rc)
 			{
 				pr_err("failed to write COMP_OVR1 rc=%d\n", rc);
-				return rc;
+				goto unlock;
 			}
 		}
 
@@ -5047,11 +5074,17 @@ int qpnp_flash_control_enable(bool enable)
 		{
 			pr_err("boost enable control write failed addr = 0x%04x, rc = %d\n",
 				the_chip->boost_base + BOOST_ENABLE_CONTROL, rc);
-			return rc;
+			goto unlock;
 		}
 	}
 	else
 	{
+		if (the_chip->flash_control_status != QPNP_FLASH_CONTROL_ON)
+		{
+			pr_debug("disable skip status = %d\n", the_chip->flash_control_status);
+			goto unlock;
+		}
+		
 		rc = qpnp_chg_masked_write(the_chip,
 			the_chip->boost_base + BOOST_ENABLE_CONTROL,
 			BOOST_PWR_EN,
@@ -5060,7 +5093,10 @@ int qpnp_flash_control_enable(bool enable)
 		{
 			pr_err("boost enable control write failed addr = 0x%04x, rc = %d\n",
 				the_chip->boost_base + BOOST_ENABLE_CONTROL, rc);
-			return rc;
+			if (!safety)
+			{
+				goto unlock;
+			}
 		}
 
 		mdelay(qpnp_flash_dis_delay_msec);
@@ -5075,7 +5111,10 @@ int qpnp_flash_control_enable(bool enable)
 			if (rc)
 			{
 				pr_err("failed to write SEC_ACCESS rc=%d\n", rc);
-				return rc;
+				if (!safety)
+				{
+					goto unlock;
+				}
 			}
 
 			rc = qpnp_chg_masked_write(the_chip,
@@ -5085,7 +5124,10 @@ int qpnp_flash_control_enable(bool enable)
 			if (rc)
 			{
 				pr_err("failed to write COMP_OVR1 rc=%d\n", rc);
-				return rc;
+				if (!safety)
+				{
+					goto unlock;
+				}
 			}
 
 			usleep(1000);
@@ -5102,18 +5144,27 @@ int qpnp_flash_control_enable(bool enable)
 		rc = qpnp_chg_usb_suspend_enable(the_chip, usb_susp_en);
 		if (rc)
 		{
-			return rc;
+			if (!safety)
+			{
+				goto unlock;
+			}
 		}
 
-		if (the_chip->flash_control_status == QPNP_FLASH_CONTROL_ON)
-		{
-			qpnp_flash_status_change(the_chip, QPNP_FLASH_CONTROL_OFF_NO_ICHG);
-			schedule_delayed_work(&the_chip->flash_check_work,
-				msecs_to_jiffies(qpnp_flash_check_msec));
-		}
+		qpnp_flash_status_change(the_chip, QPNP_FLASH_CONTROL_OFF_NO_ICHG);
+		schedule_delayed_work(&the_chip->flash_check_work,
+			msecs_to_jiffies(qpnp_flash_check_msec));
 	}
 
-	return 0;
+unlock:
+	mutex_unlock(&the_chip->flash_control_lock);
+
+	return rc;
+}
+
+int qpnp_flash_control_enable(bool enable)
+{
+	bool safety = false;
+	return __qpnp_flash_control_enable(enable, safety);
 }
 EXPORT_SYMBOL_GPL(qpnp_flash_control_enable);
 
@@ -5922,6 +5973,9 @@ qpnp_charger_probe(struct spmi_device *spmi)
 			qpnp_chg_batfet_lcl_work);
 	INIT_WORK(&chip->insertion_ocv_work,
 			qpnp_chg_insertion_ocv_work);
+#ifdef CONFIG_BATTERY_SH
+	mutex_init(&chip->flash_control_lock);
+#endif /* CONFIG_BATTERY_SH */
 
 	/* Get all device tree properties */
 	rc = qpnp_charger_read_dt_props(chip);
@@ -6166,6 +6220,7 @@ qpnp_charger_probe(struct spmi_device *spmi)
 	INIT_DELAYED_WORK(&chip->aicl_check_work, qpnp_aicl_check_work);
 #ifdef CONFIG_BATTERY_SH
 	INIT_DELAYED_WORK(&chip->flash_check_work, qpnp_flash_check_work);
+	INIT_DELAYED_WORK(&chip->flash_safety_work, qpnp_flash_safety_work);
 #endif /* CONFIG_BATTERY_SH */
 
 	if (chip->dc_chgpth_base) {
@@ -6337,6 +6392,8 @@ qpnp_charger_remove(struct spmi_device *spmi)
 	alarm_cancel(&chip->reduce_power_stage_alarm);
 #ifdef CONFIG_BATTERY_SH
 	cancel_delayed_work_sync(&chip->flash_check_work);
+	cancel_delayed_work_sync(&chip->flash_safety_work);
+	mutex_destroy(&chip->flash_control_lock);
 #endif /* CONFIG_BATTERY_SH */
 
 	mutex_destroy(&chip->batfet_vreg_lock);
