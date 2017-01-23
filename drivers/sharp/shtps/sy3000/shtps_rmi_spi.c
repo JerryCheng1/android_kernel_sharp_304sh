@@ -164,8 +164,9 @@ struct shtps_drag_hist{
 	u8							count;
 	#if defined( SHTPS_DRAG_SMOOTH_ENABLE )
 		int						history[SHTPS_DRAG_HISTORY_SIZE_MAX];
-		int						pre_comp_history;
+		int						pre_comp_history_FIXED;
 		int						history_old;
+		int						count_up_base;
 	#endif /* SHTPS_DRAG_SMOOTH_ENABLE */
 };
 
@@ -5485,6 +5486,9 @@ static inline void shtps_init_drag_hist(struct shtps_rmi_spi *ts, int xy, int fi
 {
 	ts->drag_hist[finger][xy].pre   = pos;
 	ts->drag_hist[finger][xy].count = 0;
+	#if defined( SHTPS_DRAG_SMOOTH_ENABLE )
+		ts->drag_hist[finger][xy].count_up_base = 0;
+	#endif /* SHTPS_DRAG_SMOOTH_ENABLE */
 }
 
 static void shtps_add_drag_hist(struct shtps_rmi_spi *ts, int xy, int finger, int pos)
@@ -5495,6 +5499,8 @@ static void shtps_add_drag_hist(struct shtps_rmi_spi *ts, int xy, int finger, in
 						   SHTPS_DRAG_DIR_NONE;
 	#if defined( SHTPS_DRAG_SMOOTH_ENABLE )
 		int i;
+		int drag_smooth_count_limit;
+		int drag_smooth_count_limit_new;
 	#endif /* SHTPS_DRAG_SMOOTH_ENABLE */
 
 	SHTPS_LOG_DBG_PRINT("add drag hist[%d][%s] pre = %d, cur = %d, dir = %s, cnt = %d, remain time = %d\n",
@@ -5508,8 +5514,11 @@ static void shtps_add_drag_hist(struct shtps_rmi_spi *ts, int xy, int finger, in
 		if(ts->drag_hist[finger][xy].count == 0){
 			#if defined( SHTPS_DRAG_SMOOTH_ENABLE )
 				#if defined( SHTPS_DEVELOP_MODE_ENABLE )
-					if(SHTPS_DRAG_SMOOTH_COUNT > SHTPS_DRAG_HISTORY_SIZE_MAX){
-						SHTPS_DRAG_SMOOTH_COUNT = SHTPS_DRAG_HISTORY_SIZE_MAX;
+					if(SHTPS_DRAG_SMOOTH_COUNT_MIN > SHTPS_DRAG_HISTORY_SIZE_MAX){
+						SHTPS_DRAG_SMOOTH_COUNT_MIN = SHTPS_DRAG_HISTORY_SIZE_MAX;
+					}
+					if(SHTPS_DRAG_SMOOTH_COUNT_MAX > SHTPS_DRAG_HISTORY_SIZE_MAX){
+						SHTPS_DRAG_SMOOTH_COUNT_MAX = SHTPS_DRAG_HISTORY_SIZE_MAX;
 					}
 				#endif /* #if defined( SHTPS_DEVELOP_MODE_ENABLE ) */
 				ts->drag_hist[finger][xy].history[ts->drag_hist[finger][xy].count] = pos;
@@ -5519,19 +5528,42 @@ static void shtps_add_drag_hist(struct shtps_rmi_spi *ts, int xy, int finger, in
 		}else{
 
 			#if defined( SHTPS_DRAG_SMOOTH_ENABLE )
-				if(ts->drag_hist[finger][xy].count < SHTPS_DRAG_SMOOTH_COUNT-1){
+				drag_smooth_count_limit = ts->drag_hist[finger][xy].count;
+				drag_smooth_count_limit_new = SHTPS_DRAG_SMOOTH_COUNT_MIN + (ts->drag_hist[finger][xy].count_up_base / SHTPS_DRAG_SMOOTH_COUNT_UP_STEP);
+				if(drag_smooth_count_limit < drag_smooth_count_limit_new){
+					drag_smooth_count_limit = drag_smooth_count_limit_new;
+				}
+				if(drag_smooth_count_limit > SHTPS_DRAG_SMOOTH_COUNT_MAX){
+					drag_smooth_count_limit = SHTPS_DRAG_SMOOTH_COUNT_MAX;
+				}
+
+				if(ts->drag_hist[finger][xy].dir != dir){
+					drag_smooth_count_limit = SHTPS_DRAG_SMOOTH_COUNT_MIN;
+					if(drag_smooth_count_limit < ts->drag_hist[finger][xy].count){
+						for(i= 0; i < drag_smooth_count_limit; i++){
+							ts->drag_hist[finger][xy].history[i] = ts->drag_hist[finger][xy].history[ts->drag_hist[finger][xy].count - drag_smooth_count_limit + i];
+						}
+						ts->drag_hist[finger][xy].count = drag_smooth_count_limit;
+					}
+
+					ts->drag_hist[finger][xy].count_up_base = 0;
+				}
+
+				if(ts->drag_hist[finger][xy].count < SHTPS_DRAG_SMOOTH_COUNT_MIN-1){
 					ts->drag_hist[finger][xy].history[ts->drag_hist[finger][xy].count] = pos;
-					ts->drag_hist[finger][xy].pre_comp_history = pos; 
+					ts->drag_hist[finger][xy].pre_comp_history_FIXED = SHTPS_DRAG_SMOOTH_INT_TO_FIXED(pos);
 					ts->drag_hist[finger][xy].count++;
 				}else{
-					if(ts->drag_hist[finger][xy].count == SHTPS_DRAG_SMOOTH_COUNT-1){
+					if(ts->drag_hist[finger][xy].count == drag_smooth_count_limit-1){
 						ts->drag_hist[finger][xy].count++;
 					}else{
-						for(i= 0; i < SHTPS_DRAG_SMOOTH_COUNT-1; i++){
+						for(i= 0; i < drag_smooth_count_limit-1; i++){
 							ts->drag_hist[finger][xy].history[i] = ts->drag_hist[finger][xy].history[i+1];
 						}
 					}
-					ts->drag_hist[finger][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1] = pos;
+					ts->drag_hist[finger][xy].history[drag_smooth_count_limit-1] = pos;
+
+					ts->drag_hist[finger][xy].count_up_base++;
 				}
 			#endif /* SHTPS_DRAG_SMOOTH_ENABLE */
 
@@ -8435,8 +8467,11 @@ static void shtps_diagonal_ghost_check(struct shtps_rmi_spi *ts, struct shtps_to
 #if defined( SHTPS_DRAG_SMOOTH_ENABLE )
 static void shtps_pos_compensation(struct shtps_rmi_spi *ts, struct shtps_touch_info *info, int xy)
 {
-	int inc_ave,temp;
+	int inc_ave_FIXED,temp_FIXED;
 	int i;
+	int drag_smooth_leave_max_dot_FIXED;
+	int last_history;
+	int last_history_FIXED;
 
 	if(SHTPS_DRAG_SMOOTH_DISABLE){
 		return;
@@ -8445,51 +8480,59 @@ static void shtps_pos_compensation(struct shtps_rmi_spi *ts, struct shtps_touch_
 	for(i = 0;i < shtps_get_fingermax(ts);i++){
 		if(info->fingers[i].state == SHTPS_TOUCH_STATE_FINGER /* info->fingers[i].state == SHTPS_TOUCH_STATE_PEN */){
 			if(ts->report_info.fingers[i].state != SHTPS_TOUCH_STATE_NO_TOUCH){
-				if(ts->drag_hist[i][xy].count == SHTPS_DRAG_SMOOTH_COUNT){
-					inc_ave = (ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1]- ts->drag_hist[i][xy].history[0]) / (SHTPS_DRAG_SMOOTH_COUNT-1);
+				if(ts->drag_hist[i][xy].count >= SHTPS_DRAG_SMOOTH_COUNT_MIN){
+					drag_smooth_leave_max_dot_FIXED = SHTPS_DRAG_SMOOTH_INT_TO_FIXED(SHTPS_DRAG_SMOOTH_LEAVE_MAX_DOT);
+					last_history		= ts->drag_hist[i][xy].history[ts->drag_hist[i][xy].count - 1];
+					last_history_FIXED	= SHTPS_DRAG_SMOOTH_INT_TO_FIXED(last_history);
+
+					inc_ave_FIXED = SHTPS_DRAG_SMOOTH_INT_TO_FIXED(last_history- ts->drag_hist[i][xy].history[0]) / (ts->drag_hist[i][xy].count-1);
 					if(xy == SHTPS_POSTYPE_X){
-						if(ts->drag_hist[i][xy].history_old == ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1]){
-							info->fingers[i].x = ts->drag_hist[i][xy].pre_comp_history;
+						if(ts->drag_hist[i][xy].history_old == last_history){
+							info->fingers[i].x = SHTPS_DRAG_SMOOTH_FIXED_TO_INT(ts->drag_hist[i][xy].pre_comp_history_FIXED);
 						}else{
-							if(((ts->drag_hist[i][xy].pre_comp_history + inc_ave) - ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1] ) > SHTPS_DRAG_SMOOTH_LEAVE_MAX_DOT){
-								temp = ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1] + SHTPS_DRAG_SMOOTH_LEAVE_MAX_DOT;
-							}else if(((ts->drag_hist[i][xy].pre_comp_history + inc_ave) - ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1] ) < (0-SHTPS_DRAG_SMOOTH_LEAVE_MAX_DOT)){
-								temp = ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1] - SHTPS_DRAG_SMOOTH_LEAVE_MAX_DOT;
+							if(((ts->drag_hist[i][xy].pre_comp_history_FIXED + inc_ave_FIXED) - last_history_FIXED ) > drag_smooth_leave_max_dot_FIXED){
+								temp_FIXED = last_history_FIXED + drag_smooth_leave_max_dot_FIXED;
+							}else if(((ts->drag_hist[i][xy].pre_comp_history_FIXED + inc_ave_FIXED) - last_history_FIXED ) < (0-drag_smooth_leave_max_dot_FIXED)){
+								temp_FIXED = last_history_FIXED - drag_smooth_leave_max_dot_FIXED;
 							}else{
-								temp = ts->drag_hist[i][xy].pre_comp_history + inc_ave;
+								temp_FIXED = ts->drag_hist[i][xy].pre_comp_history_FIXED + inc_ave_FIXED;
 							}
 
-							if(temp < 0){
+							if(temp_FIXED < 0){
 								info->fingers[i].x = 0;
-							}else if(temp >= CONFIG_SHTPS_SY3000_PANEL_SIZE_X){
+								ts->drag_hist[i][xy].pre_comp_history_FIXED = 0;
+							}else if(temp_FIXED >= SHTPS_DRAG_SMOOTH_INT_TO_FIXED(CONFIG_SHTPS_SY3000_PANEL_SIZE_X)){
 								info->fingers[i].x = CONFIG_SHTPS_SY3000_PANEL_SIZE_X -1;
+								ts->drag_hist[i][xy].pre_comp_history_FIXED = SHTPS_DRAG_SMOOTH_INT_TO_FIXED(info->fingers[i].x);
 							} else{
-								info->fingers[i].x = temp;
+								info->fingers[i].x = SHTPS_DRAG_SMOOTH_FIXED_TO_INT(temp_FIXED);
+								ts->drag_hist[i][xy].pre_comp_history_FIXED = temp_FIXED;
 							}
-							ts->drag_hist[i][xy].pre_comp_history = info->fingers[i].x;
-							ts->drag_hist[i][xy].history_old = ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1];
+							ts->drag_hist[i][xy].history_old = last_history;
 						}
 					}else{
-						if(ts->drag_hist[i][xy].history_old == ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1]){
-							info->fingers[i].y = ts->drag_hist[i][xy].pre_comp_history;
+						if(ts->drag_hist[i][xy].history_old == last_history){
+							info->fingers[i].y = SHTPS_DRAG_SMOOTH_FIXED_TO_INT(ts->drag_hist[i][xy].pre_comp_history_FIXED);
 						}else{
-							if(((ts->drag_hist[i][xy].pre_comp_history + inc_ave) - ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1] ) > SHTPS_DRAG_SMOOTH_LEAVE_MAX_DOT){
-								temp = ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1] + SHTPS_DRAG_SMOOTH_LEAVE_MAX_DOT;
-							}else if(((ts->drag_hist[i][xy].pre_comp_history + inc_ave) - ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1] ) < (0-SHTPS_DRAG_SMOOTH_LEAVE_MAX_DOT)){
-								temp = ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1] - SHTPS_DRAG_SMOOTH_LEAVE_MAX_DOT;
+							if(((ts->drag_hist[i][xy].pre_comp_history_FIXED + inc_ave_FIXED) - last_history_FIXED ) > drag_smooth_leave_max_dot_FIXED){
+								temp_FIXED = last_history_FIXED + drag_smooth_leave_max_dot_FIXED;
+							}else if(((ts->drag_hist[i][xy].pre_comp_history_FIXED + inc_ave_FIXED) - last_history_FIXED ) < (0-drag_smooth_leave_max_dot_FIXED)){
+								temp_FIXED = last_history_FIXED - drag_smooth_leave_max_dot_FIXED;
 							}else{
-								temp = ts->drag_hist[i][xy].pre_comp_history + inc_ave;
+								temp_FIXED = ts->drag_hist[i][xy].pre_comp_history_FIXED + inc_ave_FIXED;
 							}
 
-							if(temp < 0){
+							if(temp_FIXED < 0){
 								info->fingers[i].y = 0;
-							}else if(temp >= CONFIG_SHTPS_SY3000_PANEL_SIZE_Y){
+								ts->drag_hist[i][xy].pre_comp_history_FIXED = 0;
+							}else if(temp_FIXED >= SHTPS_DRAG_SMOOTH_INT_TO_FIXED(CONFIG_SHTPS_SY3000_PANEL_SIZE_Y)){
 								info->fingers[i].y = CONFIG_SHTPS_SY3000_PANEL_SIZE_Y -1;
+								ts->drag_hist[i][xy].pre_comp_history_FIXED = SHTPS_DRAG_SMOOTH_INT_TO_FIXED(info->fingers[i].y);
 							} else{
-								info->fingers[i].y = temp;
+								info->fingers[i].y = SHTPS_DRAG_SMOOTH_FIXED_TO_INT(temp_FIXED);
+								ts->drag_hist[i][xy].pre_comp_history_FIXED = temp_FIXED;
 							}
-							ts->drag_hist[i][xy].pre_comp_history = info->fingers[i].y;
-							ts->drag_hist[i][xy].history_old = ts->drag_hist[i][xy].history[SHTPS_DRAG_SMOOTH_COUNT-1];
+							ts->drag_hist[i][xy].history_old = last_history;
 						}
 					}
 				}

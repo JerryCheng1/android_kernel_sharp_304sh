@@ -29,6 +29,7 @@
 /* PROTOTYPES                                                                */
 /* ------------------------------------------------------------------------- */
 int shcamled_pmic_set_torch_led_1_current(unsigned mA);
+int shcamled_pmic_flash_prepare(void);
 static int shcamled_pmic_set_torch_led_2_current(unsigned mA);
 static ssize_t shcamled_torch_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t size);
 static int shcamled_torch_probe(struct platform_device *pdev);
@@ -60,8 +61,13 @@ static int shcamled_torch_remove(struct platform_device *pdev);
 /* ------------------------------------------------------------------------- */
 static struct mutex shcamled_mut = __MUTEX_INITIALIZER(shcamled_mut);
 struct task_struct *p_flash_off_thread = NULL;
-wait_queue_head_t shcamled_msg_wait;
+struct task_struct *p_flash_on_thread = NULL;
+wait_queue_head_t shcamled_msg_off_wait;
+wait_queue_head_t shcamled_msg_on_wait;
 static int flash_off_thread_active = 0;
+static int flash_on_thread_active = 0;
+static atomic_t flash_on_prepare;
+struct completion flash_on_complete;
 
 static struct platform_device shcamled_torch_dev = {
 	.name   = "shcamled_torch",
@@ -107,13 +113,14 @@ static int flash_off_thread(void * arg)
 	SHCAMLED_TRACE("%s start\n", __FUNCTION__);
 	while(!kthread_should_stop()){
 		SHCAMLED_TRACE("%s %d wait_event_interruptible\n", __FUNCTION__, __LINE__);
-		wait_event_interruptible(shcamled_msg_wait, kthread_should_stop() || flash_off_thread_active);
+		wait_event_interruptible(shcamled_msg_off_wait, kthread_should_stop() || flash_off_thread_active);
 		
 		if(flash_off_thread_active){
 			SHCAMLED_TRACE("%s %d qpnp_flash_control_enable(false) start\n", __FUNCTION__, __LINE__);
 			qpnp_flash_control_enable(false);
 			SHCAMLED_TRACE("%s %d qpnp_flash_control_enable(false) end\n", __FUNCTION__, __LINE__);
 			flash_off_thread_active = 0;
+			atomic_set(&flash_on_prepare, 0);
 			mutex_unlock(&shcamled_mut);
 		}
 	}
@@ -122,6 +129,39 @@ static int flash_off_thread(void * arg)
 	return 0;
 }
 
+static int flash_on_thread(void * arg)
+{
+	SHCAMLED_TRACE("%s start\n", __FUNCTION__);
+	while(!kthread_should_stop()){
+		SHCAMLED_TRACE("%s %d wait_event_interruptible\n", __FUNCTION__, __LINE__);
+		wait_event_interruptible(shcamled_msg_on_wait, kthread_should_stop() || flash_on_thread_active);
+		
+		if(flash_on_thread_active){
+			SHCAMLED_TRACE("%s %d qpnp_flash_control_enable(true) start\n", __FUNCTION__, __LINE__);
+			qpnp_flash_control_enable(true);
+			SHCAMLED_TRACE("%s %d qpnp_flash_control_enable(true) end\n", __FUNCTION__, __LINE__);
+			complete(&flash_on_complete);
+			flash_on_thread_active = 0;
+			mutex_unlock(&shcamled_mut);
+		}
+	}
+
+	SHCAMLED_TRACE("%s end\n", __FUNCTION__);
+	return 0;
+}
+
+int shcamled_pmic_flash_prepare(void)
+{
+	SHCAMLED_TRACE("%s start\n", __FUNCTION__);
+	mutex_lock(&shcamled_mut);
+	atomic_set(&flash_on_prepare, 1);
+	init_completion(&flash_on_complete);
+	flash_on_thread_active = 1;
+	wake_up_interruptible(&shcamled_msg_on_wait);
+
+	SHCAMLED_TRACE("%s end\n", __FUNCTION__);
+	return 0;
+}
 /* ------------------------------------------------------------------------- */
 /* shcamled_pmic_set_torch_led_1_current                                     */
 /* ------------------------------------------------------------------------- */
@@ -144,8 +184,11 @@ int shcamled_pmic_set_torch_led_1_current(unsigned mA)
 				SHCAMLED_TRACE("%s %d wake_up_interruptible start\n", __FUNCTION__, __LINE__);
 				mutex_lock(&shcamled_mut);
 //				qpnp_flash_control_enable(false);
+				if(atomic_read(&flash_on_prepare) == 1){
+					wait_for_completion(&flash_on_complete);
+				}
 				flash_off_thread_active = 1;
-				wake_up_interruptible(&shcamled_msg_wait);
+				wake_up_interruptible(&shcamled_msg_off_wait);
 				SHCAMLED_TRACE("%s %d wake_up_interruptible end\n", __FUNCTION__, __LINE__);
 
 				flash_mode = 0;
@@ -185,9 +228,12 @@ int shcamled_pmic_set_torch_led_1_current(unsigned mA)
 				torch_mode = 0;
 			}
 			SHCAMLED_TRACE("%s %d qpnp_flash_control_enable(true) start\n", __FUNCTION__, __LINE__);
-			mutex_lock(&shcamled_mut);
-			qpnp_flash_control_enable(true);
-			mutex_unlock(&shcamled_mut);
+//			qpnp_flash_control_enable(true);
+			if(atomic_read(&flash_on_prepare) == 0){
+				shcamled_pmic_flash_prepare();
+			}
+			wait_for_completion(&flash_on_complete);
+			atomic_set(&flash_on_prepare, 0);
 			SHCAMLED_TRACE("%s %d qpnp_flash_control_enable(true) end\n", __FUNCTION__, __LINE__);
 			led_trigger_event(cam_torch_flash_0_trigger, led_current);
 			led_trigger_event(cam_torch_flash_1_trigger, led_current);
@@ -199,8 +245,11 @@ int shcamled_pmic_set_torch_led_1_current(unsigned mA)
 				SHCAMLED_TRACE("%s %d wake_up_interruptible start\n", __FUNCTION__, __LINE__);
 				mutex_lock(&shcamled_mut);
 //				qpnp_flash_control_enable(false);
+				if(atomic_read(&flash_on_prepare) == 1){
+					wait_for_completion(&flash_on_complete);
+				}
 				flash_off_thread_active = 1;
-				wake_up_interruptible(&shcamled_msg_wait);
+				wake_up_interruptible(&shcamled_msg_off_wait);
 				SHCAMLED_TRACE("%s %d wake_up_interruptible end\n", __FUNCTION__, __LINE__);
 				flash_mode = 0;
 			}
@@ -246,8 +295,11 @@ static int shcamled_pmic_set_torch_led_2_current(unsigned mA)
 				SHCAMLED_TRACE("%s %d wake_up_interruptible start\n", __FUNCTION__, __LINE__);
 				mutex_lock(&shcamled_mut);
 //				qpnp_flash_control_enable(false);
+				if(atomic_read(&flash_on_prepare) == 1){
+					wait_for_completion(&flash_on_complete);
+				}
 				flash_off_thread_active = 1;
-				wake_up_interruptible(&shcamled_msg_wait);
+				wake_up_interruptible(&shcamled_msg_off_wait);
 				SHCAMLED_TRACE("%s %d wake_up_interruptible end\n", __FUNCTION__, __LINE__);
 				flash_mode = 0;
 			}
@@ -283,9 +335,12 @@ static int shcamled_pmic_set_torch_led_2_current(unsigned mA)
 					torch_mode = 0;
 				}
 				SHCAMLED_TRACE("%s %d qpnp_flash_control_enable(true) start\n", __FUNCTION__, __LINE__);
-				mutex_lock(&shcamled_mut);
-				qpnp_flash_control_enable(true);
-				mutex_unlock(&shcamled_mut);
+//				qpnp_flash_control_enable(true);
+				if(atomic_read(&flash_on_prepare) == 0){
+					shcamled_pmic_flash_prepare();
+				}
+				wait_for_completion(&flash_on_complete);
+				atomic_set(&flash_on_prepare, 0);
 				SHCAMLED_TRACE("%s %d qpnp_flash_control_enable(true) end\n", __FUNCTION__, __LINE__);
 				led_trigger_event(cam_torch_flash_0_trigger, led_current);
 				led_trigger_event(cam_torch_flash_1_trigger, led_current);
@@ -297,8 +352,11 @@ static int shcamled_pmic_set_torch_led_2_current(unsigned mA)
 					SHCAMLED_TRACE("%s %d wake_up_interruptible start\n", __FUNCTION__, __LINE__);
 					mutex_lock(&shcamled_mut);
 //					qpnp_flash_control_enable(false);
+					if(atomic_read(&flash_on_prepare) == 1){
+						wait_for_completion(&flash_on_complete);
+					}
 					flash_off_thread_active = 1;
-					wake_up_interruptible(&shcamled_msg_wait);
+					wake_up_interruptible(&shcamled_msg_off_wait);
 					SHCAMLED_TRACE("%s %d wake_up_interruptible end\n", __FUNCTION__, __LINE__);
 					flash_mode = 0;
 				}
@@ -370,7 +428,8 @@ static int shcamled_torch_probe(struct platform_device *pdev)
 		return ret;
 	}
 	
-	init_waitqueue_head(&shcamled_msg_wait);
+	init_waitqueue_head(&shcamled_msg_off_wait);
+	init_waitqueue_head(&shcamled_msg_on_wait);
 	
 	p_flash_off_thread = kthread_create(flash_off_thread, &shcamled_mut, "flash_off_thread");
 	if(p_flash_off_thread != NULL){
@@ -379,6 +438,14 @@ static int shcamled_torch_probe(struct platform_device *pdev)
 	} else {
 		SHCAMLED_TRACE("%s %d p_flash_off_thread =%p\n", __FUNCTION__, __LINE__, p_flash_off_thread);
 	}
+	p_flash_on_thread = kthread_create(flash_on_thread, &shcamled_mut, "flash_on_thread");
+	if(p_flash_on_thread != NULL){
+		wake_up_process(p_flash_on_thread);
+		SHCAMLED_TRACE("%s %d wake_up_process\n", __FUNCTION__, __LINE__);
+	} else {
+		SHCAMLED_TRACE("%s %d p_flash_on_thread =%p\n", __FUNCTION__, __LINE__, p_flash_on_thread);
+	}
+	atomic_set(&flash_on_prepare, 0);
 	
 	SHCAMLED_TRACE("%s done ret:%d\n", __FUNCTION__, ret);
 	return ret;
@@ -400,6 +467,9 @@ static int shcamled_torch_remove(struct platform_device *pdev)
 
 	if(p_flash_off_thread != NULL){
 		kthread_stop(p_flash_off_thread);
+	}
+	if(p_flash_on_thread != NULL){
+		kthread_stop(p_flash_on_thread);
 	}
 	
 	SHCAMLED_TRACE("%s done\n", __FUNCTION__);

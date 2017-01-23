@@ -333,6 +333,10 @@ int  shdisp_SYS_Host_control(int cmd, unsigned long rate)
 void shdisp_SYS_delay_us(unsigned long usec)
 {
     struct timespec tu;
+    int ret = 0;
+    unsigned int wait_ms = 0;
+
+    SHDISP_TRACE("in usec=%lu\n", usec);
 
     if (usec >= 1000 * 1000) {
         tu.tv_sec  = usec / 1000000;
@@ -344,9 +348,19 @@ void shdisp_SYS_delay_us(unsigned long usec)
 
     SHDISP_SYS_DBG_API_WAIT_START;
 
-    hrtimer_nanosleep(&tu, NULL, HRTIMER_MODE_REL, CLOCK_MONOTONIC);
+    ret = hrtimer_nanosleep(&tu, NULL, HRTIMER_MODE_REL, CLOCK_MONOTONIC);
+
+    if (ret == -ERESTART_RESTARTBLOCK) {
+        wait_ms = (unsigned int)((usec + 999) / 1000);
+
+        SHDISP_WARN("msleep start ret=%d wait_ms=%u\n", ret, wait_ms);
+        msleep(wait_ms);
+        SHDISP_WARN("msleep end\n");
+    }
 
     SHDISP_SYS_DBG_API_WAIT_END(usec);
+
+    SHDISP_TRACE("out ret=%d\n", ret);
 
     return;
 }

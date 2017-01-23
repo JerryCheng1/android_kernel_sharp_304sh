@@ -1226,16 +1226,6 @@ static int msm_isp_start_axi_stream(struct vfe_device *vfe_dev,
 	if (wait_for_complete)
 		rc = msm_isp_axi_wait_for_cfg_done(vfe_dev, camif_update);
 
-/* SHLOCAL_CAMERA_DRIVERS-> */
-	if (rc < 0) {
-		pr_err("%s: wait for config done failed\n", __func__);
-		rc = msm_isp_axi_wait_for_cfg_done(vfe_dev, camif_update);
-		if (rc < 0) {
-			pr_err("%s: wait for config done retry failed \n", __func__);
-		}
-	}
-/* SHLOCAL_CAMERA_DRIVERS<- */
-
 	return rc;
 }
 
@@ -1247,9 +1237,6 @@ static int msm_isp_stop_axi_stream(struct vfe_device *vfe_dev,
 	uint8_t wait_for_complete = 0, cur_stream_cnt = 0;
 	struct msm_vfe_axi_stream *stream_info;
 	struct msm_vfe_axi_shared_data *axi_data = &vfe_dev->axi_data;
-/* SHLOCAL_CAMERA_DRIVERS-> */
-	char *kill = NULL;
-/* SHLOCAL_CAMERA_DRIVERS<- */
 
 	if (stream_cfg_cmd->num_streams > MAX_NUM_STREAM) {
 		return -EINVAL;
@@ -1264,6 +1251,11 @@ static int msm_isp_stop_axi_stream(struct vfe_device *vfe_dev,
 			HANDLE_TO_IDX(stream_cfg_cmd->stream_handle[i])];
 
 		stream_info->state = STOP_PENDING;
+		if (stream_cfg_cmd->is_sof_freeze) {
+			msm_isp_axi_stream_enable_cfg(vfe_dev, stream_info);
+			stream_info->state = INACTIVE;
+			break;
+		}
 		if (stream_info->stream_src == CAMIF_RAW ||
 			stream_info->stream_src == IDEAL_RAW) {
 			/* We dont get reg update IRQ for raw snapshot
@@ -1292,18 +1284,7 @@ static int msm_isp_stop_axi_stream(struct vfe_device *vfe_dev,
 		rc = msm_isp_axi_wait_for_cfg_done(vfe_dev, camif_update);
 		if (rc < 0) {
 			pr_err("%s: wait for config done failed\n", __func__);
-/* SHLOCAL_CAMERA_DRIVERS-> */
-#if 0
 			return rc;
-#else
-			rc = msm_isp_axi_wait_for_cfg_done(vfe_dev, camif_update);
-			if (rc < 0) {
-				pr_err("%s: wait for config done retry failed\n", __func__);
-				strcpy(kill, "null");
-				pr_err("%s", kill);
-			}
-#endif
-/* SHLOCAL_CAMERA_DRIVERS<- */
 		}
 	}
 	msm_isp_update_stream_bandwidth(vfe_dev);
@@ -1357,9 +1338,14 @@ int msm_isp_cfg_axi_stream(struct vfe_device *vfe_dev, void *arg)
 	if (stream_cfg_cmd->cmd == START_STREAM)
 		rc = msm_isp_start_axi_stream(
 		   vfe_dev, stream_cfg_cmd, camif_update);
-	else
+	else if (stream_cfg_cmd->cmd == STOP_STREAM) {
 		rc = msm_isp_stop_axi_stream(
 		   vfe_dev, stream_cfg_cmd, camif_update);
+	} else if (stream_cfg_cmd->cmd == STOP_STREAM_SOF_FREEZE) {
+		stream_cfg_cmd->is_sof_freeze = 1;
+		rc = msm_isp_stop_axi_stream(
+		   vfe_dev, stream_cfg_cmd, camif_update);
+	}
 
 	if (rc < 0)
 		pr_err("%s: start/stop stream failed\n", __func__);

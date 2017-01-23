@@ -18,7 +18,7 @@ const unsigned short arm_fw_base = 0x7CE0;
 /* Start address */
 const unsigned long arm_fw_start = 0x00000000;
 /* Code size counted by 128bit (16Byte) */
-const unsigned long arm_fw_size = 3692;
+const unsigned long arm_fw_size = 3696;
 /* Code image */
 #include "shdisp_clmr_fw_default.h"
 

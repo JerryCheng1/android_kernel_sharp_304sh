@@ -33,6 +33,7 @@ extern int dwc3_otg_is_usb_host_running(bool);
 
 /* SHLOCAL_CAMERA_DRIVERS-> */
 extern int shcamled_pmic_set_torch_led_1_current(unsigned mA);
+extern int shcamled_pmic_flash_prepare(void);
 /* SHLOCAL_CAMERA_DRIVERS<- */
 
 extern int32_t msm_led_torch_create_classdev(
@@ -136,6 +137,18 @@ static int32_t msm_led_trigger_config(struct msm_led_flash_ctrl_t *fctrl,
 			}
 			led_trigger_event(fctrl->torch_trigger,
 				curr_l);
+		}
+#endif
+		break;
+
+	case MSM_CAMERA_LED_HIGH_PREPARE:
+#ifdef CONFIG_SHCAMERA_PICT
+		shbatt_api_get_battery_capacity(&cap_p);
+		usb_host = dwc3_otg_is_usb_host_running(false);
+		if((cap_p <= 20) || (usb_host != 0)){
+			pr_err("%s cap_p=%d usb_host=%d\n", __func__, cap_p, usb_host);
+		} else {
+			shcamled_pmic_flash_prepare();
 		}
 #endif
 		break;
